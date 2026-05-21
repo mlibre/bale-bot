@@ -400,7 +400,7 @@ async function processMessage(msg) {
 	const match = text.match(/(https?:\/\/[^\s]+)/);
 	if (!match) return;
 
-	const targetUrl = match[0];
+	let targetUrl = match[0];   // ✅ changed from const to let
 	console.log(`\n📥 Download from ${chatId}: ${targetUrl}`);
 
 	const videoId = extractYouTubeVideoId(targetUrl);
@@ -419,7 +419,7 @@ async function processMessage(msg) {
 
 	try {
 		let { buffer, contentType } = await smartDownload(targetUrl);
-		const ext = getExtension(targetUrl, contentType);  // Now returns .apk for APK MIME
+		const ext = getExtension(targetUrl, contentType);
 
 		const BLOCKED_EXTENSIONS = ['.apk', '.exe', '.dmg', '.msi'];
 		if (BLOCKED_EXTENSIONS.includes(ext)) {
@@ -427,7 +427,7 @@ async function processMessage(msg) {
 			const { zipBuffer: zippedBuf, newName } = await zipBuffer(buffer, path.basename(targetUrl) || 'file' + ext);
 			buffer = zippedBuf;
 			contentType = 'application/zip';
-			targetUrl = targetUrl + ' (zipped)';
+			targetUrl = targetUrl + ' (zipped)';   // ✅ now allowed because targetUrl is let
 		}
 
 		const sizeMB = buffer.length / (1024 * 1024);
