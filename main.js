@@ -284,7 +284,7 @@ async function keepAlivePing() {
 	}
 }
 
-// ================== YOUTUBE HANDLING (fixed) ==================
+// ================== YOUTUBE HANDLING ==================
 function extractYouTubeVideoId(url) {
 	try {
 		const parsed = new URL(url);
@@ -307,7 +307,6 @@ async function handleYouTubeDownload(chatId, videoUrl, replyTo) {
 
 	await sendChatAction(chatId, 'typing');
 
-	// Try different InnerTube clients in order
 	const clientsToTry = ['WEB_CREATOR', 'IOS', 'WEB'];
 
 	for (const client of clientsToTry) {
@@ -343,7 +342,7 @@ async function handleYouTubeDownload(chatId, videoUrl, replyTo) {
 
 			const contentType = format.mime_type?.split(';')[0] || 'video/mp4';
 
-			// --- ZIP block if video extension is blocked (rare, but just in case) ---
+			// --- ZIP wrapper for blocked video extensions (rare, but safe) ---
 			const ext = getExtension(videoUrl, contentType);
 			const blocked = ['.apk', '.exe', '.dmg', '.msi'];
 			let finalBuffer = buffer;
@@ -351,8 +350,9 @@ async function handleYouTubeDownload(chatId, videoUrl, replyTo) {
 			let finalUrl = videoUrl;
 			if (blocked.includes(ext)) {
 				console.log(`   🔐 Wrapping ${ext} in ZIP`);
-				const { zipBuffer, newName } = await zipBuffer(buffer, path.basename(videoUrl) || 'video' + ext);
-				finalBuffer = zipBuffer;
+				// Rename destructured variable to avoid TDZ clash with the function name
+				const { zipBuffer: zippedBuf, newName } = await zipBuffer(buffer, path.basename(videoUrl) || 'video' + ext);
+				finalBuffer = zippedBuf;
 				finalContentType = 'application/zip';
 				finalUrl = videoUrl + ' (zipped)';
 			}
@@ -393,7 +393,6 @@ async function processMessage(msg) {
 
 	if (!text) return;
 
-	// Reset one-week timer on every valid message
 	aliveUntil = Date.now() + ONE_WEEK_MS;
 	console.log(`⏰ Timer reset: alive until ${new Date(aliveUntil).toISOString()}`);
 
@@ -408,7 +407,6 @@ async function processMessage(msg) {
 	const targetUrl = match[0];
 	console.log(`\n📥 Download from ${chatId}: ${targetUrl}`);
 
-	// Detect YouTube
 	const videoId = extractYouTubeVideoId(targetUrl);
 	if (videoId) {
 		try {
@@ -424,17 +422,16 @@ async function processMessage(msg) {
 	await sendChatAction(chatId, 'typing');
 
 	try {
-		let { buffer, contentType } = await smartDownload(targetUrl);   // note: let, not const
+		let { buffer, contentType } = await smartDownload(targetUrl);
 		const ext = getExtension(targetUrl, contentType);
 
-		// === Blocked extensions → wrap in ZIP ===
-		const BLOCKED_EXTENSIONS = ['.apk', '.exe', '.dmg', '.msi'];   // add more if needed
+		const BLOCKED_EXTENSIONS = ['.apk', '.exe', '.dmg', '.msi'];
 		if (BLOCKED_EXTENSIONS.includes(ext)) {
 			console.log(`   🔐 Wrapping ${ext} in ZIP`);
-			const { zipBuffer, newName } = await zipBuffer(buffer, path.basename(targetUrl) || 'file' + ext);
-			buffer = zipBuffer;
+			// Rename destructured variable to avoid TDZ clash
+			const { zipBuffer: zippedBuf, newName } = await zipBuffer(buffer, path.basename(targetUrl) || 'file' + ext);
+			buffer = zippedBuf;
 			contentType = 'application/zip';
-			// Update the URL caption to indicate it's now zipped
 			targetUrl = targetUrl + ' (zipped)';
 		}
 
@@ -490,7 +487,6 @@ setInterval(() => {
 
 // ================== INITIALIZATION ==================
 async function initialize() {
-	// Create YouTube session once
 	try {
 		ytSession = await Innertube.create({
 			lang: 'en',
