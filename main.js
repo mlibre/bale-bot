@@ -57,47 +57,57 @@ async function downloadFromRapidApi(videoUrl, videoId) {
 		params: {
 			videoId: videoId,
 			urlAccess: 'normal',   // get video/audio URLs
-			videos: 'auto',        // include simplified video objects
-			audios: 'auto',        // include simplified audio objects
+			videos: 'auto',
+			audios: 'auto',
 			subtitles: false,
 			related: false
 		},
 		headers: {
 			'x-rapidapi-host': 'youtube-media-downloader.p.rapidapi.com',
-			'x-rapidapi-key': '4bfa8f14fbmsh5b099348bc6e573p101190jsn94b77f4403f8'
+			'x-rapidapi-key': '4bfa8f14fbmsh5b099348bc6e573p101190jsn94b77f4403f8',
+			'Content-Type': 'application/json'
 		},
 		timeout: 55000
 	};
 
-	const response = await axios.get(options.url, {
-		params: options.params,
-		headers: options.headers,
-		timeout: options.timeout
-	});
+	try {
+		const response = await axios.get(options.url, {
+			params: options.params,
+			headers: options.headers,
+			timeout: options.timeout
+		});
 
-	// Parse the response – we want the best mp4 video
-	const data = response.data;
-	if (!data || !data.videos || !data.videos.items || data.videos.items.length === 0) {
-		throw new Error('RapidAPI returned no video files');
+		// Parse the response
+		const data = response.data;
+		if (!data || !data.videos || !data.videos.items || data.videos.items.length === 0) {
+			throw new Error('RapidAPI returned no video files');
+		}
+
+		// Choose the highest quality mp4
+		const videoItems = data.videos.items.filter(item => item.mimeType?.startsWith('video/mp4'));
+		if (videoItems.length === 0) {
+			throw new Error('No mp4 video found in RapidAPI response');
+		}
+
+		// Sort by quality (height) descending, pick first
+		videoItems.sort((a, b) => (b.height || 0) - (a.height || 0));
+		const bestVideo = videoItems[0];
+
+		if (!bestVideo.url) {
+			throw new Error('No download URL in selected video item');
+		}
+
+		console.log(`   📥 Downloading from RapidAPI link (${bestVideo.qualityLabel || bestVideo.quality})`);
+		const { buffer, contentType } = await smartDownload(bestVideo.url);
+		return { buffer, contentType };
+	} catch (err) {
+		// Log full error details from RapidAPI
+		if (err.response) {
+			console.error('   ❌ RapidAPI HTTP Status:', err.response.status);
+			console.error('   ❌ RapidAPI Response Body:', JSON.stringify(err.response.data));
+		}
+		throw new Error(`RapidAPI fallback failed: ${err.message}`);
 	}
-
-	// Choose the highest quality mp4 (you can adjust this logic)
-	const videoItems = data.videos.items.filter(item => item.mimeType?.startsWith('video/mp4'));
-	if (videoItems.length === 0) {
-		throw new Error('No mp4 video found in RapidAPI response');
-	}
-
-	// Sort by quality (height) descending, pick first
-	videoItems.sort((a, b) => (b.height || 0) - (a.height || 0));
-	const bestVideo = videoItems[0];
-
-	if (!bestVideo.url) {
-		throw new Error('No download URL in selected video item');
-	}
-
-	console.log(`   📥 Downloading from RapidAPI link (${bestVideo.qualityLabel || bestVideo.quality})`);
-	const { buffer, contentType } = await smartDownload(bestVideo.url);
-	return { buffer, contentType };
 }
 
 // ================== API HELPERS ==================
@@ -359,7 +369,7 @@ async function handleYouTubeDownload(chatId, videoUrl, replyTo) {
 
 	await sendChatAction(chatId, 'typing');
 
-	// Try InnerTube clients first (your existing logic)
+	// Try InnerTube clients
 	const clientsToTry = ['WEB_CREATOR', 'IOS', 'WEB'];
 
 	for (const client of clientsToTry) {
@@ -472,7 +482,17 @@ async function handleYouTubeDownload(chatId, videoUrl, replyTo) {
 		}
 	} catch (fallbackErr) {
 		console.error(`   ❌ RapidAPI fallback failed: ${fallbackErr.message}`);
-		await sendMessage(chatId, '❌ Unable to download this YouTube video.\nAll clients and fallback API failed. This may be due to YouTube restrictions or server IP blocking.', replyTo);
+		// Improved error message – hints at possible restrictions
+		await sendMessage(chatId,
+			'❌ Unable to download this YouTube video.\n\n' +
+			'Possible reasons:\n' +
+			'• Age‑restricted / members‑only video\n' +
+			'• Regional blocking\n' +
+			'• The video is a livestream or upcoming premiere\n' +
+			'• RapidAPI quota exhausted or plan limitation\n\n' +
+			'Try again later or with a different video.',
+			replyTo
+		);
 	}
 }
 
@@ -585,10 +605,12 @@ setInterval(() => {
 // ================== INITIALIZATION ==================
 async function initialize() {
 	try {
+		// const cookies = process.env.INNERTUBE_COOKIES || undefined;
 		ytSession = await Innertube.create({
 			lang: 'en',
 			location: 'US',
 			retrieve_player: true,
+			// cookies: cookies   // ← uncomment if you have a valid cookie string/file
 		});
 		console.log('✅ YouTube session created');
 	} catch (err) {
