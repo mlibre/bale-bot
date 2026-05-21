@@ -1,5 +1,6 @@
 const axios = require('axios');
 const https = require('https');
+const http = require('http');
 const FormData = require('form-data');
 const path = require('path');
 const { URL } = require('url');
@@ -14,7 +15,19 @@ const MAX_CHUNK_SIZE = MAX_CHUNK_MB * 1024 * 1024;
 const DOWNLOAD_LIMIT = 500 * 1024 * 1024;
 const ALLOWED_PREFIX = 'mlibre';
 
+// Self-ping configuration
+const PORT = process.env.PORT || 3000;
+const SELF_URL = process.env.SELF_URL || `http://localhost:${PORT}`;
+
 let offset = -1;
+
+// ================== RESILIENCE ==================
+process.on('uncaughtException', (err) => {
+	console.error('❗ Uncaught Exception:', err);
+});
+process.on('unhandledRejection', (reason, promise) => {
+	console.error('❗ Unhandled Rejection at:', promise, 'reason:', reason);
+});
 
 // ================== API HELPERS ==================
 async function callApi(method, params = {}) {
@@ -220,6 +233,16 @@ async function sendFileInChunks(chatId, buffer, originalUrl, replyTo) {
 	return { baseName: `part_1_of_${totalParts}${ext}`, totalParts };
 }
 
+// ================== SELF-PING ==================
+async function keepAlivePing() {
+	try {
+		await axios.get(SELF_URL, { timeout: 5000 });
+		console.log(`🔁 Keep-alive ping sent to ${SELF_URL}`);
+	} catch (e) {
+		console.warn('⚠️ Keep-alive ping failed:', e.message);
+	}
+}
+
 // ================== MAIN HANDLER ==================
 async function processMessage(msg) {
 	const chatId = msg.chat.id;
@@ -228,8 +251,7 @@ async function processMessage(msg) {
 
 	const username = (msg.from?.username || '').toLowerCase();
 	if (!username.startsWith(ALLOWED_PREFIX)) {
-		// Silently ignore (or optionally send "Access denied" once)
-		// await sendMessage(chatId, '❌ This bot is private.');
+		// Silently ignore
 		return;
 	}
 
@@ -242,6 +264,7 @@ async function processMessage(msg) {
 			`- Files > ${MAX_CHUNK_MB} MB are split into parts.\n` +
 			`- After parts arrive, I'll explain how to reassemble them.`
 		);
+		keepAlivePing();
 		return;
 	}
 
@@ -260,6 +283,7 @@ async function processMessage(msg) {
 
 		if (sizeMB > DOWNLOAD_LIMIT / (1024 * 1024)) {
 			await sendMessage(chatId, `❌ File too large (${sizeMB.toFixed(1)} MB). Max is 500 MB.`, msgId);
+			keepAlivePing();
 			return;
 		}
 
@@ -267,12 +291,8 @@ async function processMessage(msg) {
 			await sendSingleFile(chatId, buffer, contentType, targetUrl, msgId);
 		} else {
 			const { baseName, totalParts } = await sendFileInChunks(chatId, buffer, targetUrl, msgId);
-
-			// Build example filename (same base but with the original extension)
 			const ext = path.extname(baseName);
-			const baseWithoutPart = baseName.replace(/part_\d+_of_\d+/, '').replace(ext, '');
 			const originalExt = ext;
-
 			const instructions =
 				`✅ All ${totalParts} parts sent.\n\n` +
 				`To reassemble the file:\n` +
@@ -281,14 +301,25 @@ async function processMessage(msg) {
 				`Windows (Command Prompt):\n\`\`\`\ncopy /b part_*${originalExt} original${originalExt}\n\`\`\`\n` +
 				`\`\`\`\n` +
 				`(Put all parts in one folder and run the command)`;
-
 			await sendMessage(chatId, instructions, msgId);
 		}
+		keepAlivePing();
 	} catch (err) {
 		console.error(`   ❌ Error:`, err.message);
 		await sendMessage(chatId, `❌ Failed: ${err.message}`, msgId);
+		keepAlivePing();
 	}
 }
+
+// ================== HTTP SERVER (for self-ping) ==================
+const server = http.createServer((req, res) => {
+	res.writeHead(200, { 'Content-Type': 'text/plain' });
+	res.end('Bot is alive\n');
+});
+
+server.listen(PORT, () => {
+	console.log(`🌐 HTTP keep-alive server running on port ${PORT}`);
+});
 
 // ================== POLLING ==================
 async function poll() {
@@ -298,7 +329,13 @@ async function poll() {
 			if (updates && updates.length) {
 				for (const upd of updates) {
 					offset = upd.update_id + 1;
-					if (upd.message) await processMessage(upd.message);
+					if (upd.message) {
+						try {
+							await processMessage(upd.message);
+						} catch (msgErr) {
+							console.error('🔥 Error processing message:', msgErr);
+						}
+					}
 				}
 			}
 		} catch (err) {
