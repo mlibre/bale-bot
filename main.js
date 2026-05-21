@@ -258,15 +258,13 @@ async function keepAlivePing() {
 	}
 }
 
-// ================== YOUTUBE HANDLING ==================
+// ================== YOUTUBE HANDLING (fixed) ==================
 function extractYouTubeVideoId(url) {
 	try {
 		const parsed = new URL(url);
-		// youtube.com/watch?v=ID
 		if (parsed.hostname.includes('youtube.com') && parsed.pathname === '/watch') {
 			return parsed.searchParams.get('v');
 		}
-		// youtu.be/ID
 		if (parsed.hostname === 'youtu.be') {
 			return parsed.pathname.split('/')[1]?.split('?')[0] || null;
 		}
@@ -282,50 +280,67 @@ async function handleYouTubeDownload(chatId, videoUrl, replyTo) {
 	}
 
 	await sendChatAction(chatId, 'typing');
-	const info = await ytSession.getBasicInfo(videoId);
-	const title = info.basic_info.title || 'video';
 
-	// Try to pick a progressive format (video+audio, usually 720p max)
-	const format = info.chooseFormat({
-		type: 'video+audio',
-		quality: 'bestefficiency'
-	});
+	// Try different InnerTube clients in order
+	const clientsToTry = ['WEB_CREATOR', 'IOS', 'WEB'];
 
-	if (!format) {
-		await sendMessage(chatId, '❌ No progressive (video+audio) format found. The video might only have separate DASH streams, which are not supported.', replyTo);
-		return;
+	for (const client of clientsToTry) {
+		try {
+			console.log(`   🔄 Trying YouTube client: ${client}`);
+			const info = await ytSession.getInfo(videoId, { client });
+			const title = info.basic_info.title || 'video';
+
+			if (!info.streaming_data) {
+				console.log(`   ⚠️ Client '${client}' returned no streaming data.`);
+				continue;
+			}
+
+			const format = info.chooseFormat({
+				type: 'video+audio',
+				quality: 'bestefficiency'
+			});
+
+			if (!format) {
+				console.log(`   ⚠️ Client '${client}' gave streaming data but no progressive format.`);
+				continue;
+			}
+
+			console.log(`   🎬 Downloading: ${title} (${format.quality_label || format.quality})`);
+
+			const buffer = await info.download({ format, type: 'buffer' });
+
+			const sizeMB = buffer.length / (1024 * 1024);
+			if (sizeMB > DOWNLOAD_LIMIT / (1024 * 1024)) {
+				await sendMessage(chatId, `❌ Video too large (${sizeMB.toFixed(1)} MB). Max is 500 MB.`, replyTo);
+				return;
+			}
+
+			const contentType = format.mime_type?.split(';')[0] || 'video/mp4';
+
+			if (buffer.length <= MAX_CHUNK_SIZE) {
+				await sendSingleFile(chatId, buffer, contentType, videoUrl, replyTo);
+			} else {
+				const { baseName, totalParts } = await sendFileInChunks(chatId, buffer, videoUrl, replyTo);
+				const ext = path.extname(baseName);
+				const instructions =
+					`✅ All ${totalParts} parts sent.\n\n` +
+					`To reassemble the file:\n` +
+					`\`\`\`bash\n` +
+					`Linux / macOS:\n\`\`\`\ncat part_*${ext} > original${ext}\n\`\`\`\n` +
+					`Windows (Command Prompt):\n\`\`\`\ncopy /b part_*${ext} original${ext}\n\`\`\`\n` +
+					`\`\`\``;
+				await sendMessage(chatId, instructions, replyTo);
+			}
+
+			// Success – exit the function
+			return;
+		} catch (err) {
+			console.warn(`   ❌ Client '${client}' failed: ${err.message}`);
+		}
 	}
 
-	console.log(`   🎬 Downloading YouTube video: ${title} (${format.quality_label || format.quality})`);
-
-	// Download the video as a buffer
-	const buffer = await info.download({
-		format,
-		type: 'buffer'
-	});
-
-	const sizeMB = buffer.length / (1024 * 1024);
-	if (sizeMB > DOWNLOAD_LIMIT / (1024 * 1024)) {
-		await sendMessage(chatId, `❌ Video too large (${sizeMB.toFixed(1)} MB). Max is 500 MB.`, replyTo);
-		return;
-	}
-
-	const contentType = format.mime_type?.split(';')[0] || 'video/mp4';
-
-	if (buffer.length <= MAX_CHUNK_SIZE) {
-		await sendSingleFile(chatId, buffer, contentType, videoUrl, replyTo);
-	} else {
-		const { baseName, totalParts } = await sendFileInChunks(chatId, buffer, videoUrl, replyTo);
-		const ext = path.extname(baseName);
-		const instructions =
-			`✅ All ${totalParts} parts sent.\n\n` +
-			`To reassemble the file:\n` +
-			`\`\`\`bash\n` +
-			`Linux / macOS:\n\`\`\`\ncat part_*${ext} > original${ext}\n\`\`\`\n` +
-			`Windows (Command Prompt):\n\`\`\`\ncopy /b part_*${ext} original${ext}\n\`\`\`\n` +
-			`\`\`\``;
-		await sendMessage(chatId, instructions, replyTo);
-	}
+	// If we reach here, all clients failed
+	await sendMessage(chatId, '❌ Unable to download this YouTube video.\nAll clients failed. This may be due to YouTube restrictions or server IP blocking.', replyTo);
 }
 
 // ================== MAIN HANDLER ==================
