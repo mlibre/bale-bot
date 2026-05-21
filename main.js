@@ -1,3 +1,4 @@
+const https = require('https');
 const axios = require('axios');
 const FormData = require('form-data');
 const fs = require('fs');
@@ -64,8 +65,9 @@ async function downloadFile(urlStr) {
     method: 'GET',
     url: urlStr,
     responseType: 'arraybuffer',
-    timeout: 120_000,                // 2 minutes for large files
-    maxContentLength: 60 * 1024 * 1024, // 60 MB raw download
+    timeout: 120_000,
+    maxContentLength: 60 * 1024 * 1024,
+    httpsAgent: new https.Agent({ rejectUnauthorized: false })  // ← bypass SSL check
   });
   const buffer = Buffer.from(response.data);
   const contentType = response.headers['content-type'] || '';
