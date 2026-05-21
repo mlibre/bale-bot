@@ -6,7 +6,7 @@ const path = require('path');
 const { URL } = require('url');
 const { PassThrough } = require('stream');
 const { Innertube } = require('youtubei.js');
-const archiver = require('archiver');
+const { ZipArchive } = require('archiver');
 
 // ================== CONFIG ==================
 const TOKEN = '766686566:G0tqsBZJ7OtKtRFvnOgGFI7i8xsB-Q7jfQk';
@@ -93,16 +93,11 @@ async function sendChatAction(chatId, action = 'typing') {
 }
 
 // ================== ZIP HELPER ==================
-/**
- * Wraps a buffer into a ZIP file (store, no compression) in memory.
- * @param {Buffer} buffer - file content
- * @param {string} originalName - the original file name with extension
- * @returns {Promise<{ zipBuffer: Buffer, newName: string }>}
- */
 async function zipBuffer(buffer, originalName) {
 	return new Promise((resolve, reject) => {
 		const chunks = [];
-		const archive = archiver('zip', { zlib: { level: 0 } }); // store only, no compression
+		// v8: only options object, no format string
+		const archive = new ZipArchive({ zlib: { level: 0 } });
 		const output = new PassThrough();
 		output.on('data', chunk => chunks.push(chunk));
 		output.on('end', () => resolve({
@@ -117,7 +112,7 @@ async function zipBuffer(buffer, originalName) {
 	});
 }
 
-// ================== DOWNLOAD STRATEGIES (for non-YouTube) ==================
+// ================== DOWNLOAD STRATEGIES ==================
 async function download_axios_simple(url) {
 	return axios({
 		method: 'GET', url, responseType: 'arraybuffer',
@@ -187,7 +182,7 @@ async function smartDownload(url) {
 	throw new Error('All download strategies failed');
 }
 
-// ================== FILENAME HELPER ==================
+// ================== FILENAME HELPER (UPDATED) ==================
 function getExtension(url, contentType) {
 	try {
 		const urlPath = new URL(url).pathname;
@@ -204,6 +199,8 @@ function getExtension(url, contentType) {
 		'image/webp': '.webp', 'video/mp4': '.mp4', 'video/x-matroska': '.mkv',
 		'video/webm': '.webm', 'audio/mpeg': '.mp3', 'audio/ogg': '.ogg',
 		'audio/wav': '.wav',
+		// ADD this line to map APK MIME type to .apk
+		'application/vnd.android.package-archive': '.apk',
 	};
 	for (const [mime, ext] of Object.entries(mimeMap)) {
 		if (contentType.includes(mime)) return ext;
@@ -342,7 +339,7 @@ async function handleYouTubeDownload(chatId, videoUrl, replyTo) {
 
 			const contentType = format.mime_type?.split(';')[0] || 'video/mp4';
 
-			// --- ZIP wrapper for blocked video extensions (rare, but safe) ---
+			// ZIP wrapper for blocked video extensions (rare)
 			const ext = getExtension(videoUrl, contentType);
 			const blocked = ['.apk', '.exe', '.dmg', '.msi'];
 			let finalBuffer = buffer;
@@ -350,7 +347,6 @@ async function handleYouTubeDownload(chatId, videoUrl, replyTo) {
 			let finalUrl = videoUrl;
 			if (blocked.includes(ext)) {
 				console.log(`   🔐 Wrapping ${ext} in ZIP`);
-				// Rename destructured variable to avoid TDZ clash with the function name
 				const { zipBuffer: zippedBuf, newName } = await zipBuffer(buffer, path.basename(videoUrl) || 'video' + ext);
 				finalBuffer = zippedBuf;
 				finalContentType = 'application/zip';
@@ -423,12 +419,11 @@ async function processMessage(msg) {
 
 	try {
 		let { buffer, contentType } = await smartDownload(targetUrl);
-		const ext = getExtension(targetUrl, contentType);
+		const ext = getExtension(targetUrl, contentType);  // Now returns .apk for APK MIME
 
 		const BLOCKED_EXTENSIONS = ['.apk', '.exe', '.dmg', '.msi'];
 		if (BLOCKED_EXTENSIONS.includes(ext)) {
 			console.log(`   🔐 Wrapping ${ext} in ZIP`);
-			// Rename destructured variable to avoid TDZ clash
 			const { zipBuffer: zippedBuf, newName } = await zipBuffer(buffer, path.basename(targetUrl) || 'file' + ext);
 			buffer = zippedBuf;
 			contentType = 'application/zip';
