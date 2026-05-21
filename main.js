@@ -5,6 +5,7 @@ const FormData = require('form-data');
 const path = require('path');
 const { URL } = require('url');
 const { PassThrough } = require('stream');
+const { Innertube } = require('youtubei.js');
 
 // ================== CONFIG ==================
 const TOKEN = '766686566:G0tqsBZJ7OtKtRFvnOgGFI7i8xsB-Q7jfQk';
@@ -14,6 +15,7 @@ const MAX_CHUNK_MB = 19;
 const MAX_CHUNK_SIZE = MAX_CHUNK_MB * 1024 * 1024;
 const DOWNLOAD_LIMIT = 500 * 1024 * 1024;
 
+// Allowed users – username must start with one of these prefixes
 const ALLOWED_PREFIX = ['mlibre', 'The_Mohist'];
 
 // Self-ping configuration
@@ -27,10 +29,13 @@ const PING_URLS = [
 
 // One-week timer (7 days in ms)
 const ONE_WEEK_MS = 7 * 24 * 60 * 60 * 1000;
-let aliveUntil = 0;               // timestamp after which we stop pinging
-const PING_INTERVAL_MS = 13 * 60 * 1000;   // 13 minutes (safe margin under 15 min)
+let aliveUntil = 0;
+const PING_INTERVAL_MS = 13 * 60 * 1000;
 
 let offset = -1;
+
+// YouTube.js session – created once
+let ytSession = null;
 
 // ================== RESILIENCE ==================
 process.on('uncaughtException', (err) => {
@@ -86,7 +91,7 @@ async function sendChatAction(chatId, action = 'typing') {
 	try { await callApi('sendChatAction', { chat_id: chatId, action }); } catch { }
 }
 
-// ================== DOWNLOAD STRATEGIES ==================
+// ================== DOWNLOAD STRATEGIES (for non-YouTube) ==================
 async function download_axios_simple(url) {
 	return axios({
 		method: 'GET', url, responseType: 'arraybuffer',
@@ -239,7 +244,6 @@ async function sendFileInChunks(chatId, buffer, originalUrl, replyTo) {
 
 // ================== SELF-PING ==================
 async function keepAlivePing() {
-	// Try all configured URLs (custom domain + localhost variants)
 	const results = await Promise.allSettled(
 		PING_URLS.map(url =>
 			axios.get(url, { timeout: 5000 }).then(() => {
@@ -254,6 +258,76 @@ async function keepAlivePing() {
 	}
 }
 
+// ================== YOUTUBE HANDLING ==================
+function extractYouTubeVideoId(url) {
+	try {
+		const parsed = new URL(url);
+		// youtube.com/watch?v=ID
+		if (parsed.hostname.includes('youtube.com') && parsed.pathname === '/watch') {
+			return parsed.searchParams.get('v');
+		}
+		// youtu.be/ID
+		if (parsed.hostname === 'youtu.be') {
+			return parsed.pathname.split('/')[1]?.split('?')[0] || null;
+		}
+	} catch { }
+	return null;
+}
+
+async function handleYouTubeDownload(chatId, videoUrl, replyTo) {
+	const videoId = extractYouTubeVideoId(videoUrl);
+	if (!videoId) {
+		await sendMessage(chatId, '❌ Invalid YouTube URL.', replyTo);
+		return;
+	}
+
+	await sendChatAction(chatId, 'typing');
+	const info = await ytSession.getBasicInfo(videoId);
+	const title = info.basic_info.title || 'video';
+
+	// Try to pick a progressive format (video+audio, usually 720p max)
+	const format = info.chooseFormat({
+		type: 'video+audio',
+		quality: 'bestefficiency'
+	});
+
+	if (!format) {
+		await sendMessage(chatId, '❌ No progressive (video+audio) format found. The video might only have separate DASH streams, which are not supported.', replyTo);
+		return;
+	}
+
+	console.log(`   🎬 Downloading YouTube video: ${title} (${format.quality_label || format.quality})`);
+
+	// Download the video as a buffer
+	const buffer = await info.download({
+		format,
+		type: 'buffer'
+	});
+
+	const sizeMB = buffer.length / (1024 * 1024);
+	if (sizeMB > DOWNLOAD_LIMIT / (1024 * 1024)) {
+		await sendMessage(chatId, `❌ Video too large (${sizeMB.toFixed(1)} MB). Max is 500 MB.`, replyTo);
+		return;
+	}
+
+	const contentType = format.mime_type?.split(';')[0] || 'video/mp4';
+
+	if (buffer.length <= MAX_CHUNK_SIZE) {
+		await sendSingleFile(chatId, buffer, contentType, videoUrl, replyTo);
+	} else {
+		const { baseName, totalParts } = await sendFileInChunks(chatId, buffer, videoUrl, replyTo);
+		const ext = path.extname(baseName);
+		const instructions =
+			`✅ All ${totalParts} parts sent.\n\n` +
+			`To reassemble the file:\n` +
+			`\`\`\`bash\n` +
+			`Linux / macOS:\n\`\`\`\ncat part_*${ext} > original${ext}\n\`\`\`\n` +
+			`Windows (Command Prompt):\n\`\`\`\ncopy /b part_*${ext} original${ext}\n\`\`\`\n` +
+			`\`\`\``;
+		await sendMessage(chatId, instructions, replyTo);
+	}
+}
+
 // ================== MAIN HANDLER ==================
 async function processMessage(msg) {
 	const chatId = msg.chat.id;
@@ -261,23 +335,19 @@ async function processMessage(msg) {
 	const msgId = msg.message_id;
 
 	const username = (msg.from?.username || '').toLowerCase();
-	// Must match at least one allowed prefix
 	if (!username || !ALLOWED_PREFIX.some(prefix => username.startsWith(prefix))) {
-		return; // silently ignore unauthorized users
+		return;
 	}
 
 	if (!text) return;
 
-	// RESET the one-week timer on every valid message
+	// Reset one-week timer on every valid message
 	aliveUntil = Date.now() + ONE_WEEK_MS;
 	console.log(`⏰ Timer reset: alive until ${new Date(aliveUntil).toISOString()}`);
 
 	if (text === '/start') {
 		await sendMessage(chatId,
-			`👋 Send a direct link (http/https), I'll download it.\n` +
-			`- Works even with expired certificates.\n` +
-			`- Files > ${MAX_CHUNK_MB} MB are split into parts.\n` +
-			`- After parts arrive, I'll explain how to reassemble them.`
+			`👋`
 		);
 		return;
 	}
@@ -288,6 +358,19 @@ async function processMessage(msg) {
 	const targetUrl = match[0];
 	console.log(`\n📥 Download from ${chatId}: ${targetUrl}`);
 
+	// Detect YouTube
+	const videoId = extractYouTubeVideoId(targetUrl);
+	if (videoId) {
+		try {
+			await handleYouTubeDownload(chatId, targetUrl, msgId);
+		} catch (err) {
+			console.error(`   ❌ YouTube error:`, err.message);
+			await sendMessage(chatId, `❌ YouTube download failed: ${err.message}`, msgId);
+		}
+		return;
+	}
+
+	// Non-YouTube download
 	await sendChatAction(chatId, 'typing');
 
 	try {
@@ -305,15 +388,13 @@ async function processMessage(msg) {
 		} else {
 			const { baseName, totalParts } = await sendFileInChunks(chatId, buffer, targetUrl, msgId);
 			const ext = path.extname(baseName);
-			const originalExt = ext;
 			const instructions =
 				`✅ All ${totalParts} parts sent.\n\n` +
 				`To reassemble the file:\n` +
 				`\`\`\`bash\n` +
-				`Linux / macOS:\n\`\`\`\ncat part_*${originalExt} > original${originalExt}\n\`\`\`\n` +
-				`Windows (Command Prompt):\n\`\`\`\ncopy /b part_*${originalExt} original${originalExt}\n\`\`\`\n` +
-				`\`\`\`\n` +
-				`(Put all parts in one folder and run the command)`;
+				`Linux / macOS:\n\`\`\`\ncat part_*${ext} > original${ext}\n\`\`\`\n` +
+				`Windows (Command Prompt):\n\`\`\`\ncopy /b part_*${ext} original${ext}\n\`\`\`\n` +
+				`\`\`\``;
 			await sendMessage(chatId, instructions, msgId);
 		}
 	} catch (err) {
@@ -332,7 +413,7 @@ server.listen(PORT, () => {
 	console.log(`🌐 HTTP keep-alive server running on port ${PORT}`);
 });
 
-// ================== PERIODIC KEEP-ALIVE (while timer is active) ==================
+// ================== PERIODIC KEEP-ALIVE ==================
 setInterval(() => {
 	const now = Date.now();
 	if (aliveUntil > 0 && now < aliveUntil) {
@@ -340,12 +421,31 @@ setInterval(() => {
 		keepAlivePing();
 	} else if (aliveUntil > 0 && now >= aliveUntil) {
 		console.log('⏹️ One-week timer expired – pings stopped');
-		aliveUntil = 0; // reset to avoid logging repeatedly
+		aliveUntil = 0;
 	}
 }, PING_INTERVAL_MS);
 
+// ================== INITIALIZATION ==================
+async function initialize() {
+	// Create YouTube session once
+	try {
+		ytSession = await Innertube.create({
+			lang: 'en',
+			location: 'US',
+			retrieve_player: true,
+		});
+		console.log('✅ YouTube session created');
+	} catch (err) {
+		console.error('❌ Failed to create YouTube session:', err.message);
+		console.log('⚠️ YouTube downloads will not work, but bot remains alive.');
+		// We don't crash – bot still works for other downloads
+	}
+}
+
 // ================== POLLING ==================
 async function poll() {
+	await initialize();
+	console.log('🤖 Bale downloader ready (chunks: ' + MAX_CHUNK_MB + ' MB)');
 	while (true) {
 		try {
 			const updates = await callApi('getUpdates', { offset, timeout: 30, limit: 10 });
@@ -368,5 +468,4 @@ async function poll() {
 	}
 }
 
-console.log('🤖 Bale downloader ready (chunks: ' + MAX_CHUNK_MB + ' MB)');
 poll().catch(console.error);
