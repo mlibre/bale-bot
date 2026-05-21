@@ -11,7 +11,6 @@
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "dependencies": {
-    "adm-zip": "^0.5.17",
     "archiver": "^8.0.0",
     "axios": "^1.16.1",
     "form-data": "^4.0.5",
