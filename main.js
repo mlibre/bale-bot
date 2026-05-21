@@ -605,12 +605,12 @@ setInterval(() => {
 // ================== INITIALIZATION ==================
 async function initialize() {
 	try {
-		// const cookies = process.env.INNERTUBE_COOKIES || undefined;
+		const cookies = process.env.INNERTUBE_COOKIES || "GPS=1; PREF=f4=4000000&f6=40000000&tz=Asia.Tehran&f7=100; CONSISTENCY=AHzIXryfeuAoyuL_2TYtLhxTd0bcxG0O0VBRl4vlanthgh7-SNkGqidQPSK5ap_C1QIhZfkPL3a8hxD8DbxerhNSaCumqwEOhWBbvJrXkq46C1FYLB8BJ7E; YSC=lWTGcUFmF94; VISITOR_INFO1_LIVE=oUJ4sZLQuOU; VISITOR_PRIVACY_METADATA=CgJJUhIEGgAgTw%3D%3D; __Secure-YNID=18.YT=kk1GwMMHLS_l7C03c_alXsVtNAE-a-ZewG1LaOO7EQJRnFoyFVjRN4drD64h9rWG0Pf2C15mjAfFUq-wvNjYIegz-Bh7E2Vtjx6s5MZM0FyYAeuia1ifLVlFTWCLzKUCa0iAj7s5Ho0NXVg6bFhJDhUnvTr7JRWwbDlf3TdS1NCWwOR0frkmgI55Wo_nPWYUvKfvMKMAoNLOVAtXLEgo_3NJeKJJJRC-RBLMj-ukx_FbvvBRMdM_tySf3A19p_pr5BdHkZsauJKaQzGba_Hboxq_0d9lwMALPutJ70FCDVS-BSu0Cni6fPgidz_LwARmjNMHjl9rz2Vr7SSWpGR-bg; __Secure-ROLLOUT_TOKEN=CKCk6tCPxpiwjgEQj5nu7I_LlAMY7LK57Y_LlAM%3D";
 		ytSession = await Innertube.create({
 			lang: 'en',
 			location: 'US',
 			retrieve_player: true,
-			// cookies: cookies   // ← uncomment if you have a valid cookie string/file
+			cookies: cookies   // ← uncomment if you have a valid cookie string/file
 		});
 		console.log('✅ YouTube session created');
 	} catch (err) {
