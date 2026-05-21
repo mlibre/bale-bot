@@ -454,7 +454,7 @@ async function processMessage(msg) {
 				`Linux / macOS:\n\`\`\`\ncat part_*${fext} > original${fext}\n\`\`\`\n` +
 				`Windows (Command Prompt):\n\`\`\`\ncopy /b part_*${fext} original${fext}\n\`\`\`\n` +
 				`\`\`\``;
-			await sendMessage(chatId, instructions, msgId);  // ✅ was replyTo → now msgId
+			await sendMessage(chatId, instructions, msgId);
 		}
 	} catch (err) {
 		console.error(`   ❌ Error:`, err.message);
