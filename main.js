@@ -96,7 +96,6 @@ async function sendChatAction(chatId, action = 'typing') {
 async function zipBuffer(buffer, originalName) {
 	return new Promise((resolve, reject) => {
 		const chunks = [];
-		// v8: only options object, no format string
 		const archive = new ZipArchive({ zlib: { level: 0 } });
 		const output = new PassThrough();
 		output.on('data', chunk => chunks.push(chunk));
@@ -182,7 +181,7 @@ async function smartDownload(url) {
 	throw new Error('All download strategies failed');
 }
 
-// ================== FILENAME HELPER (UPDATED) ==================
+// ================== FILENAME HELPER ==================
 function getExtension(url, contentType) {
 	try {
 		const urlPath = new URL(url).pathname;
@@ -199,7 +198,6 @@ function getExtension(url, contentType) {
 		'image/webp': '.webp', 'video/mp4': '.mp4', 'video/x-matroska': '.mkv',
 		'video/webm': '.webm', 'audio/mpeg': '.mp3', 'audio/ogg': '.ogg',
 		'audio/wav': '.wav',
-		// ADD this line to map APK MIME type to .apk
 		'application/vnd.android.package-archive': '.apk',
 	};
 	for (const [mime, ext] of Object.entries(mimeMap)) {
@@ -230,13 +228,16 @@ async function sendSingleFile(chatId, buffer, contentType, originalUrl, replyTo)
 	return uploadFile(method, fd);
 }
 
-async function sendFileInChunks(chatId, buffer, originalUrl, replyTo) {
-	let ext = '.bin';
-	try {
-		const urlPath = new URL(originalUrl).pathname;
-		const tmp = path.extname(urlPath).toLowerCase();
-		if (tmp && tmp.length > 1 && tmp.length <= 10) ext = tmp;
-	} catch { }
+// Updated: accepts an optional options.ext to force extension
+async function sendFileInChunks(chatId, buffer, originalUrl, replyTo, options = {}) {
+	let ext = options.ext || '.bin';
+	if (!options.ext) {
+		try {
+			const urlPath = new URL(originalUrl).pathname;
+			const tmp = path.extname(urlPath).toLowerCase();
+			if (tmp && tmp.length > 1 && tmp.length <= 10) ext = tmp;
+		} catch { }
+	}
 
 	const totalParts = Math.ceil(buffer.length / MAX_CHUNK_SIZE);
 	console.log(`   📦 Splitting into ${totalParts} parts (max ${MAX_CHUNK_MB} MB each)`);
@@ -339,24 +340,25 @@ async function handleYouTubeDownload(chatId, videoUrl, replyTo) {
 
 			const contentType = format.mime_type?.split(';')[0] || 'video/mp4';
 
-			// ZIP wrapper for blocked video extensions (rare)
 			const ext = getExtension(videoUrl, contentType);
 			const blocked = ['.apk', '.exe', '.dmg', '.msi'];
 			let finalBuffer = buffer;
 			let finalContentType = contentType;
 			let finalUrl = videoUrl;
+			let forceExt = null;   // ✅ will be set to '.zip' if zipped
 			if (blocked.includes(ext)) {
 				console.log(`   🔐 Wrapping ${ext} in ZIP`);
 				const { zipBuffer: zippedBuf, newName } = await zipBuffer(buffer, path.basename(videoUrl) || 'video' + ext);
 				finalBuffer = zippedBuf;
 				finalContentType = 'application/zip';
 				finalUrl = videoUrl + ' (zipped)';
+				forceExt = '.zip';
 			}
 
 			if (finalBuffer.length <= MAX_CHUNK_SIZE) {
 				await sendSingleFile(chatId, finalBuffer, finalContentType, finalUrl, replyTo);
 			} else {
-				const { baseName, totalParts } = await sendFileInChunks(chatId, finalBuffer, finalUrl, replyTo);
+				const { baseName, totalParts } = await sendFileInChunks(chatId, finalBuffer, finalUrl, replyTo, { ext: forceExt });
 				const fext = path.extname(baseName);
 				const instructions =
 					`✅ All ${totalParts} parts sent.\n\n` +
@@ -400,7 +402,7 @@ async function processMessage(msg) {
 	const match = text.match(/(https?:\/\/[^\s]+)/);
 	if (!match) return;
 
-	let targetUrl = match[0];   // ✅ changed from const to let
+	let targetUrl = match[0];   // ✅ let, not const
 	console.log(`\n📥 Download from ${chatId}: ${targetUrl}`);
 
 	const videoId = extractYouTubeVideoId(targetUrl);
@@ -422,12 +424,14 @@ async function processMessage(msg) {
 		const ext = getExtension(targetUrl, contentType);
 
 		const BLOCKED_EXTENSIONS = ['.apk', '.exe', '.dmg', '.msi'];
+		let forceExt = null;
 		if (BLOCKED_EXTENSIONS.includes(ext)) {
 			console.log(`   🔐 Wrapping ${ext} in ZIP`);
 			const { zipBuffer: zippedBuf, newName } = await zipBuffer(buffer, path.basename(targetUrl) || 'file' + ext);
 			buffer = zippedBuf;
 			contentType = 'application/zip';
-			targetUrl = targetUrl + ' (zipped)';   // ✅ now allowed because targetUrl is let
+			targetUrl = targetUrl + ' (zipped)';
+			forceExt = '.zip';   // ✅ will be used for chunk filenames
 		}
 
 		const sizeMB = buffer.length / (1024 * 1024);
@@ -441,7 +445,7 @@ async function processMessage(msg) {
 		if (buffer.length <= MAX_CHUNK_SIZE) {
 			await sendSingleFile(chatId, buffer, contentType, targetUrl, msgId);
 		} else {
-			const { baseName, totalParts } = await sendFileInChunks(chatId, buffer, targetUrl, msgId);
+			const { baseName, totalParts } = await sendFileInChunks(chatId, buffer, targetUrl, msgId, { ext: forceExt });
 			const fext = path.extname(baseName);
 			const instructions =
 				`✅ All ${totalParts} parts sent.\n\n` +
@@ -450,7 +454,7 @@ async function processMessage(msg) {
 				`Linux / macOS:\n\`\`\`\ncat part_*${fext} > original${fext}\n\`\`\`\n` +
 				`Windows (Command Prompt):\n\`\`\`\ncopy /b part_*${fext} original${fext}\n\`\`\`\n` +
 				`\`\`\``;
-			await sendMessage(chatId, instructions, msgId);
+			await sendMessage(chatId, instructions, replyTo);
 		}
 	} catch (err) {
 		console.error(`   ❌ Error:`, err.message);
