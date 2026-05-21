@@ -9,11 +9,11 @@ const { PassThrough } = require('stream');
 const TOKEN = '766686566:G0tqsBZJ7OtKtRFvnOgGFI7i8xsB-Q7jfQk';
 const API = `https://tapi.bale.ai/bot${TOKEN}`;
 
-const MAX_CHUNK_MB = 19;             // safe under Bale’s 50 MB limit
+const MAX_CHUNK_MB = 19;
 const MAX_CHUNK_SIZE = MAX_CHUNK_MB * 1024 * 1024;
-const DOWNLOAD_LIMIT = 500 * 1024 * 1024;   // total max download
+const DOWNLOAD_LIMIT = 500 * 1024 * 1024;
 
-let offset = 0;
+let offset = -1;
 
 // ================== API HELPERS ==================
 async function callApi(method, params = {}) {
@@ -39,7 +39,7 @@ async function uploadFile(method, formData) {
     const res = await axios.post(url, formData, {
       timeout: 120_000,
       headers: formData.getHeaders(),
-      maxContentLength: 60 * 1024 * 1024,   // 60 MB safety
+      maxContentLength: 60 * 1024 * 1024,
     });
     if (res.data?.ok) return res.data.result;
     throw new Error(`API: ${res.data?.description || 'Unknown'} (code ${res.data?.error_code || '?'})`);
@@ -131,38 +131,26 @@ async function smartDownload(url) {
   throw new Error('All download strategies failed');
 }
 
-// ================== FILENAME EXTENSION ==================
+// ================== FILENAME HELPER ==================
 function getExtension(url, contentType) {
-  // 1) Try from URL path (e.g., .mkv, .pdf, .zip)
+  // 1) from URL path
   try {
     const urlPath = new URL(url).pathname;
     const ext = path.extname(urlPath).toLowerCase();
-    if (ext && ext.length > 1 && ext.length <= 10) return ext; // .something
+    if (ext && ext.length > 1 && ext.length <= 10) return ext;
   } catch {}
 
-  // 2) Fallback to MIME type mapping (add more as needed)
+  // 2) from MIME type
   const mimeMap = {
-    'text/html': '.html',
-    'text/plain': '.txt',
-    'text/css': '.css',
-    'text/javascript': '.js',
-    'application/json': '.json',
-    'application/pdf': '.pdf',
-    'application/zip': '.zip',
-    'application/x-rar-compressed': '.rar',
-    'application/x-7z-compressed': '.7z',
-    'image/jpeg': '.jpg',
-    'image/png': '.png',
-    'image/gif': '.gif',
-    'image/webp': '.webp',
-    'video/mp4': '.mp4',
-    'video/x-matroska': '.mkv',
-    'video/webm': '.webm',
-    'audio/mpeg': '.mp3',
-    'audio/ogg': '.ogg',
+    'text/html': '.html', 'text/plain': '.txt', 'text/css': '.css',
+    'text/javascript': '.js', 'application/json': '.json',
+    'application/pdf': '.pdf', 'application/zip': '.zip',
+    'application/x-rar-compressed': '.rar', 'application/x-7z-compressed': '.7z',
+    'image/jpeg': '.jpg', 'image/png': '.png', 'image/gif': '.gif',
+    'image/webp': '.webp', 'video/mp4': '.mp4', 'video/x-matroska': '.mkv',
+    'video/webm': '.webm', 'audio/mpeg': '.mp3', 'audio/ogg': '.ogg',
     'audio/wav': '.wav',
   };
-
   for (const [mime, ext] of Object.entries(mimeMap)) {
     if (contentType.includes(mime)) return ext;
   }
@@ -191,7 +179,19 @@ async function sendSingleFile(chatId, buffer, contentType, originalUrl, replyTo)
   return uploadFile(method, fd);
 }
 
+/**
+ * Splits the buffer into ≤MAX_CHUNK_MB parts and sends them.
+ * Returns { baseName, totalParts } for the instruction message.
+ */
 async function sendFileInChunks(chatId, buffer, originalUrl, replyTo) {
+  // Determine extension from the original URL (fallback .bin)
+  let ext = '.bin';
+  try {
+    const urlPath = new URL(originalUrl).pathname;
+    const tmp = path.extname(urlPath).toLowerCase();
+    if (tmp && tmp.length > 1 && tmp.length <= 10) ext = tmp;
+  } catch {}
+
   const totalParts = Math.ceil(buffer.length / MAX_CHUNK_SIZE);
   console.log(`   📦 Splitting into ${totalParts} parts (max ${MAX_CHUNK_MB} MB each)`);
 
@@ -200,8 +200,8 @@ async function sendFileInChunks(chatId, buffer, originalUrl, replyTo) {
     const end = Math.min(start + MAX_CHUNK_SIZE, buffer.length);
     const chunk = buffer.slice(start, end);
 
-    const filename = `part_${i + 1}_of_${totalParts}.bin`;
-    const caption = `${originalUrl}\n[Part ${i + 1}/${totalParts}]`;
+    const filename = `part_${i + 1}_of_${totalParts}${ext}`;
+    const caption = `[Part ${i + 1}/${totalParts}]`;   // no link
 
     const stream = new PassThrough();
     stream.end(chunk);
@@ -212,9 +212,11 @@ async function sendFileInChunks(chatId, buffer, originalUrl, replyTo) {
     fd.append('caption', caption);
     if (replyTo) fd.append('reply_to_message_id', replyTo);
 
-    console.log(`   📤 Sending part ${i + 1}/${totalParts} (${(chunk.length / 1024 / 1024).toFixed(1)} MB)`);
+    console.log(`   📤 Sending ${filename} (${(chunk.length / 1024 / 1024).toFixed(1)} MB)`);
     await uploadFile('sendDocument', fd);
   }
+
+  return { baseName: `part_1_of_${totalParts}${ext}`, totalParts };
 }
 
 // ================== MAIN HANDLER ==================
@@ -228,9 +230,9 @@ async function processMessage(msg) {
   if (text === '/start') {
     await sendMessage(chatId,
       `👋 Send a direct link (http/https), I'll download it.\n` +
-      `- SSL issues bypassed\n` +
-      `- Files > ${MAX_CHUNK_MB} MB are split & sent in parts\n` +
-      `- Max total download: ${DOWNLOAD_LIMIT / 1024 / 1024} MB`
+      `- Works even with expired certificates.\n` +
+      `- Files > ${MAX_CHUNK_MB} MB are split into parts.\n` +
+      `- After parts arrive, I'll explain how to reassemble them.`
     );
     return;
   }
@@ -239,7 +241,7 @@ async function processMessage(msg) {
   if (!match) return;
 
   const targetUrl = match[0];
-  console.log(`\n📥 Download request from ${chatId}: ${targetUrl}`);
+  console.log(`\n📥 Download from ${chatId}: ${targetUrl}`);
 
   await sendChatAction(chatId, 'typing');
 
@@ -256,7 +258,23 @@ async function processMessage(msg) {
     if (buffer.length <= MAX_CHUNK_SIZE) {
       await sendSingleFile(chatId, buffer, contentType, targetUrl, msgId);
     } else {
-      await sendFileInChunks(chatId, buffer, targetUrl, msgId);
+      const { baseName, totalParts } = await sendFileInChunks(chatId, buffer, targetUrl, msgId);
+
+      // Build example filename (same base but with the original extension)
+      const ext = path.extname(baseName);
+      const baseWithoutPart = baseName.replace(/part_\d+_of_\d+/, '').replace(ext, '');
+      const originalExt = ext;
+
+      const instructions =
+        `✅ All ${totalParts} parts sent.\n\n` +
+		  `To reassemble the file:\n` +
+        `\`\`\`bash\n`+
+        `Linux / macOS:\n\`\`\`\ncat part_*${originalExt} > original${originalExt}\n\`\`\`\n` +
+        `Windows (Command Prompt):\n\`\`\`\ncopy /b part_*${originalExt} original${originalExt}\n\`\`\`\n` +
+        `\`\`\`\n`+
+        `(Put all parts in one folder and run the command)`;
+
+      await sendMessage(chatId, instructions, msgId);
     }
   } catch (err) {
     console.error(`   ❌ Error:`, err.message);
@@ -282,5 +300,5 @@ async function poll() {
   }
 }
 
-console.log('🤖 Bale downloader started (chunk size: ' + MAX_CHUNK_MB + ' MB)');
+console.log('🤖 Bale downloader ready (chunks: ' + MAX_CHUNK_MB + ' MB)');
 poll().catch(console.error);
