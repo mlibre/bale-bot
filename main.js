@@ -46,6 +46,60 @@ process.on('unhandledRejection', (reason, promise) => {
 	console.error('❗ Unhandled Rejection at:', promise, 'reason:', reason);
 });
 
+/**
+ * Fallback: use RapidAPI YouTube Media Downloader v2
+ */
+async function downloadFromRapidApi(videoUrl, videoId) {
+	console.log(`   🔄 Trying RapidAPI fallback...`);
+	const options = {
+		method: 'GET',
+		url: 'https://youtube-media-downloader.p.rapidapi.com/v2/video/details',
+		params: {
+			videoId: videoId,
+			urlAccess: 'normal',   // get video/audio URLs
+			videos: 'auto',        // include simplified video objects
+			audios: 'auto',        // include simplified audio objects
+			subtitles: false,
+			related: false
+		},
+		headers: {
+			'x-rapidapi-host': 'youtube-media-downloader.p.rapidapi.com',
+			'x-rapidapi-key': '4bfa8f14fbmsh5b099348bc6e573p101190jsn94b77f4403f8'
+		},
+		timeout: 55000
+	};
+
+	const response = await axios.get(options.url, {
+		params: options.params,
+		headers: options.headers,
+		timeout: options.timeout
+	});
+
+	// Parse the response – we want the best mp4 video
+	const data = response.data;
+	if (!data || !data.videos || !data.videos.items || data.videos.items.length === 0) {
+		throw new Error('RapidAPI returned no video files');
+	}
+
+	// Choose the highest quality mp4 (you can adjust this logic)
+	const videoItems = data.videos.items.filter(item => item.mimeType?.startsWith('video/mp4'));
+	if (videoItems.length === 0) {
+		throw new Error('No mp4 video found in RapidAPI response');
+	}
+
+	// Sort by quality (height) descending, pick first
+	videoItems.sort((a, b) => (b.height || 0) - (a.height || 0));
+	const bestVideo = videoItems[0];
+
+	if (!bestVideo.url) {
+		throw new Error('No download URL in selected video item');
+	}
+
+	console.log(`   📥 Downloading from RapidAPI link (${bestVideo.qualityLabel || bestVideo.quality})`);
+	const { buffer, contentType } = await smartDownload(bestVideo.url);
+	return { buffer, contentType };
+}
+
 // ================== API HELPERS ==================
 async function callApi(method, params = {}) {
 	const url = `${API}/${method}`;
@@ -305,6 +359,7 @@ async function handleYouTubeDownload(chatId, videoUrl, replyTo) {
 
 	await sendChatAction(chatId, 'typing');
 
+	// Try InnerTube clients first (your existing logic)
 	const clientsToTry = ['WEB_CREATOR', 'IOS', 'WEB'];
 
 	for (const client of clientsToTry) {
@@ -329,7 +384,6 @@ async function handleYouTubeDownload(chatId, videoUrl, replyTo) {
 			}
 
 			console.log(`   🎬 Downloading: ${title} (${format.quality_label || format.quality})`);
-
 			const buffer = await info.download({ format, type: 'buffer' });
 
 			const sizeMB = buffer.length / (1024 * 1024);
@@ -340,12 +394,13 @@ async function handleYouTubeDownload(chatId, videoUrl, replyTo) {
 
 			const contentType = format.mime_type?.split(';')[0] || 'video/mp4';
 
+			// --- ZIP wrapper for blocked video extensions (rare) ---
 			const ext = getExtension(videoUrl, contentType);
 			const blocked = ['.apk', '.exe', '.dmg', '.msi'];
 			let finalBuffer = buffer;
 			let finalContentType = contentType;
 			let finalUrl = videoUrl;
-			let forceExt = null;   // ✅ will be set to '.zip' if zipped
+			let forceExt = null;
 			if (blocked.includes(ext)) {
 				console.log(`   🔐 Wrapping ${ext} in ZIP`);
 				const { zipBuffer: zippedBuf, newName } = await zipBuffer(buffer, path.basename(videoUrl) || 'video' + ext);
@@ -375,7 +430,50 @@ async function handleYouTubeDownload(chatId, videoUrl, replyTo) {
 		}
 	}
 
-	await sendMessage(chatId, '❌ Unable to download this YouTube video.\nAll clients failed. This may be due to YouTube restrictions or server IP blocking.', replyTo);
+	// ---- All InnerTube clients failed → try RapidAPI fallback ----
+	try {
+		const { buffer, contentType } = await downloadFromRapidApi(videoUrl, videoId);
+
+		const sizeMB = buffer.length / (1024 * 1024);
+		if (sizeMB > DOWNLOAD_LIMIT / (1024 * 1024)) {
+			await sendMessage(chatId, `❌ Video too large (${sizeMB.toFixed(1)} MB). Max is 500 MB.`, replyTo);
+			return;
+		}
+
+		// Apply same blocked-extension zipping logic
+		const ext = getExtension(videoUrl, contentType);
+		const blocked = ['.apk', '.exe', '.dmg', '.msi'];
+		let finalBuffer = buffer;
+		let finalContentType = contentType;
+		let finalUrl = videoUrl;
+		let forceExt = null;
+		if (blocked.includes(ext)) {
+			console.log(`   🔐 Wrapping ${ext} in ZIP`);
+			const { zipBuffer: zippedBuf, newName } = await zipBuffer(buffer, path.basename(videoUrl) || 'video' + ext);
+			finalBuffer = zippedBuf;
+			finalContentType = 'application/zip';
+			finalUrl = videoUrl + ' (zipped)';
+			forceExt = '.zip';
+		}
+
+		if (finalBuffer.length <= MAX_CHUNK_SIZE) {
+			await sendSingleFile(chatId, finalBuffer, finalContentType, finalUrl, replyTo);
+		} else {
+			const { baseName, totalParts } = await sendFileInChunks(chatId, finalBuffer, finalUrl, replyTo, { ext: forceExt });
+			const fext = path.extname(baseName);
+			const instructions =
+				`✅ All ${totalParts} parts sent.\n\n` +
+				`To reassemble the file:\n` +
+				`\`\`\`bash\n` +
+				`Linux / macOS:\n\`\`\`\ncat part_*${fext} > original${fext}\n\`\`\`\n` +
+				`Windows (Command Prompt):\n\`\`\`\ncopy /b part_*${fext} original${fext}\n\`\`\`\n` +
+				`\`\`\``;
+			await sendMessage(chatId, instructions, replyTo);
+		}
+	} catch (fallbackErr) {
+		console.error(`   ❌ RapidAPI fallback failed: ${fallbackErr.message}`);
+		await sendMessage(chatId, '❌ Unable to download this YouTube video.\nAll clients and fallback API failed. This may be due to YouTube restrictions or server IP blocking.', replyTo);
+	}
 }
 
 // ================== MAIN HANDLER ==================
