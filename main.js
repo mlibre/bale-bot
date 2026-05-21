@@ -402,7 +402,7 @@ async function processMessage(msg) {
 	const match = text.match(/(https?:\/\/[^\s]+)/);
 	if (!match) return;
 
-	let targetUrl = match[0];   // ✅ let, not const
+	let targetUrl = match[0];
 	console.log(`\n📥 Download from ${chatId}: ${targetUrl}`);
 
 	const videoId = extractYouTubeVideoId(targetUrl);
@@ -431,7 +431,7 @@ async function processMessage(msg) {
 			buffer = zippedBuf;
 			contentType = 'application/zip';
 			targetUrl = targetUrl + ' (zipped)';
-			forceExt = '.zip';   // ✅ will be used for chunk filenames
+			forceExt = '.zip';
 		}
 
 		const sizeMB = buffer.length / (1024 * 1024);
@@ -454,7 +454,7 @@ async function processMessage(msg) {
 				`Linux / macOS:\n\`\`\`\ncat part_*${fext} > original${fext}\n\`\`\`\n` +
 				`Windows (Command Prompt):\n\`\`\`\ncopy /b part_*${fext} original${fext}\n\`\`\`\n` +
 				`\`\`\``;
-			await sendMessage(chatId, instructions, replyTo);
+			await sendMessage(chatId, instructions, msgId);  // ✅ was replyTo → now msgId
 		}
 	} catch (err) {
 		console.error(`   ❌ Error:`, err.message);
