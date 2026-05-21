@@ -9,9 +9,9 @@ const { PassThrough } = require('stream');
 const TOKEN = '766686566:G0tqsBZJ7OtKtRFvnOgGFI7i8xsB-Q7jfQk';
 const API = `https://tapi.bale.ai/bot${TOKEN}`;
 
-const MAX_FILE_MB = 45;           // Send in chunks if over this
-const MAX_CHUNK_SIZE = MAX_FILE_MB * 1024 * 1024;
-const DOWNLOAD_LIMIT = 500 * 1024 * 1024;   // Max total download size
+const MAX_CHUNK_MB = 19;             // safe under Bale’s 50 MB limit
+const MAX_CHUNK_SIZE = MAX_CHUNK_MB * 1024 * 1024;
+const DOWNLOAD_LIMIT = 500 * 1024 * 1024;   // total max download
 
 let offset = 0;
 
@@ -58,10 +58,10 @@ async function sendMessage(chatId, text, replyTo = null) {
 }
 
 async function sendChatAction(chatId, action = 'typing') {
-  try { await callApi('sendChatAction', { chat_id: chatId, action }); } catch { /* ignore */ }
+  try { await callApi('sendChatAction', { chat_id: chatId, action }); } catch {}
 }
 
-// ================== DOWNLOAD STRATEGIES (unchanged) ==================
+// ================== DOWNLOAD STRATEGIES ==================
 async function download_axios_simple(url) {
   return axios({
     method: 'GET', url, responseType: 'arraybuffer',
@@ -131,21 +131,45 @@ async function smartDownload(url) {
   throw new Error('All download strategies failed');
 }
 
-// ================== FILE SENDING HELPERS ==================
+// ================== FILENAME EXTENSION ==================
 function getExtension(url, contentType) {
+  // 1) Try from URL path (e.g., .mkv, .pdf, .zip)
   try {
-    const ext = path.extname(new URL(url).pathname).toLowerCase();
-    if (ext) return ext;
+    const urlPath = new URL(url).pathname;
+    const ext = path.extname(urlPath).toLowerCase();
+    if (ext && ext.length > 1 && ext.length <= 10) return ext; // .something
   } catch {}
-  const map = {
-    'image/jpeg': '.jpg', 'image/png': '.png', 'image/gif': '.gif',
-    'video/mp4': '.mp4', 'audio/mpeg': '.mp3', 'application/pdf': '.pdf'
+
+  // 2) Fallback to MIME type mapping (add more as needed)
+  const mimeMap = {
+    'text/html': '.html',
+    'text/plain': '.txt',
+    'text/css': '.css',
+    'text/javascript': '.js',
+    'application/json': '.json',
+    'application/pdf': '.pdf',
+    'application/zip': '.zip',
+    'application/x-rar-compressed': '.rar',
+    'application/x-7z-compressed': '.7z',
+    'image/jpeg': '.jpg',
+    'image/png': '.png',
+    'image/gif': '.gif',
+    'image/webp': '.webp',
+    'video/mp4': '.mp4',
+    'video/x-matroska': '.mkv',
+    'video/webm': '.webm',
+    'audio/mpeg': '.mp3',
+    'audio/ogg': '.ogg',
+    'audio/wav': '.wav',
   };
-  for (const [mime, e] of Object.entries(map))
-    if (contentType.includes(mime)) return e;
+
+  for (const [mime, ext] of Object.entries(mimeMap)) {
+    if (contentType.includes(mime)) return ext;
+  }
   return '.bin';
 }
 
+// ================== FILE SENDING ==================
 async function sendSingleFile(chatId, buffer, contentType, originalUrl, replyTo) {
   const ext = getExtension(originalUrl, contentType);
   const filename = `file${ext}`;
@@ -169,7 +193,7 @@ async function sendSingleFile(chatId, buffer, contentType, originalUrl, replyTo)
 
 async function sendFileInChunks(chatId, buffer, originalUrl, replyTo) {
   const totalParts = Math.ceil(buffer.length / MAX_CHUNK_SIZE);
-  console.log(`   📦 Splitting into ${totalParts} parts (max ${MAX_FILE_MB} MB each)`);
+  console.log(`   📦 Splitting into ${totalParts} parts (max ${MAX_CHUNK_MB} MB each)`);
 
   for (let i = 0; i < totalParts; i++) {
     const start = i * MAX_CHUNK_SIZE;
@@ -202,8 +226,12 @@ async function processMessage(msg) {
   if (!text) return;
 
   if (text === '/start') {
-    await sendMessage(chatId, `👋 Send a direct link (http/https), I'll download and forward it.\n` +
-      `- Bypasses expired certificates\n- Files > ${MAX_FILE_MB} MB are split into parts\n- Max total download: ${DOWNLOAD_LIMIT / 1024 / 1024} MB`);
+    await sendMessage(chatId,
+      `👋 Send a direct link (http/https), I'll download it.\n` +
+      `- SSL issues bypassed\n` +
+      `- Files > ${MAX_CHUNK_MB} MB are split & sent in parts\n` +
+      `- Max total download: ${DOWNLOAD_LIMIT / 1024 / 1024} MB`
+    );
     return;
   }
 
@@ -254,6 +282,5 @@ async function poll() {
   }
 }
 
-// ================== START ==================
-console.log('🤖 Bale file downloader online...');
+console.log('🤖 Bale downloader started (chunk size: ' + MAX_CHUNK_MB + ' MB)');
 poll().catch(console.error);
