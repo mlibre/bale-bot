@@ -6,6 +6,7 @@ const path = require('path');
 const { URL } = require('url');
 const { PassThrough } = require('stream');
 const { Innertube } = require('youtubei.js');
+const archiver = require('archiver');
 
 // ================== CONFIG ==================
 const TOKEN = '766686566:G0tqsBZJ7OtKtRFvnOgGFI7i8xsB-Q7jfQk';
@@ -89,6 +90,31 @@ async function sendMessage(chatId, text, replyTo = null) {
 
 async function sendChatAction(chatId, action = 'typing') {
 	try { await callApi('sendChatAction', { chat_id: chatId, action }); } catch { }
+}
+
+// ================== ZIP HELPER ==================
+/**
+ * Wraps a buffer into a ZIP file (store, no compression) in memory.
+ * @param {Buffer} buffer - file content
+ * @param {string} originalName - the original file name with extension
+ * @returns {Promise<{ zipBuffer: Buffer, newName: string }>}
+ */
+async function zipBuffer(buffer, originalName) {
+	return new Promise((resolve, reject) => {
+		const chunks = [];
+		const archive = archiver('zip', { zlib: { level: 0 } }); // store only, no compression
+		const output = new PassThrough();
+		output.on('data', chunk => chunks.push(chunk));
+		output.on('end', () => resolve({
+			zipBuffer: Buffer.concat(chunks),
+			newName: originalName + '.zip'
+		}));
+		output.on('error', reject);
+
+		archive.pipe(output);
+		archive.append(buffer, { name: originalName });
+		archive.finalize();
+	});
 }
 
 // ================== DOWNLOAD STRATEGIES (for non-YouTube) ==================
@@ -317,29 +343,40 @@ async function handleYouTubeDownload(chatId, videoUrl, replyTo) {
 
 			const contentType = format.mime_type?.split(';')[0] || 'video/mp4';
 
-			if (buffer.length <= MAX_CHUNK_SIZE) {
-				await sendSingleFile(chatId, buffer, contentType, videoUrl, replyTo);
+			// --- ZIP block if video extension is blocked (rare, but just in case) ---
+			const ext = getExtension(videoUrl, contentType);
+			const blocked = ['.apk', '.exe', '.dmg', '.msi'];
+			let finalBuffer = buffer;
+			let finalContentType = contentType;
+			let finalUrl = videoUrl;
+			if (blocked.includes(ext)) {
+				console.log(`   🔐 Wrapping ${ext} in ZIP`);
+				const { zipBuffer, newName } = await zipBuffer(buffer, path.basename(videoUrl) || 'video' + ext);
+				finalBuffer = zipBuffer;
+				finalContentType = 'application/zip';
+				finalUrl = videoUrl + ' (zipped)';
+			}
+
+			if (finalBuffer.length <= MAX_CHUNK_SIZE) {
+				await sendSingleFile(chatId, finalBuffer, finalContentType, finalUrl, replyTo);
 			} else {
-				const { baseName, totalParts } = await sendFileInChunks(chatId, buffer, videoUrl, replyTo);
-				const ext = path.extname(baseName);
+				const { baseName, totalParts } = await sendFileInChunks(chatId, finalBuffer, finalUrl, replyTo);
+				const fext = path.extname(baseName);
 				const instructions =
 					`✅ All ${totalParts} parts sent.\n\n` +
 					`To reassemble the file:\n` +
 					`\`\`\`bash\n` +
-					`Linux / macOS:\n\`\`\`\ncat part_*${ext} > original${ext}\n\`\`\`\n` +
-					`Windows (Command Prompt):\n\`\`\`\ncopy /b part_*${ext} original${ext}\n\`\`\`\n` +
+					`Linux / macOS:\n\`\`\`\ncat part_*${fext} > original${fext}\n\`\`\`\n` +
+					`Windows (Command Prompt):\n\`\`\`\ncopy /b part_*${fext} original${fext}\n\`\`\`\n` +
 					`\`\`\``;
 				await sendMessage(chatId, instructions, replyTo);
 			}
-
-			// Success – exit the function
 			return;
 		} catch (err) {
 			console.warn(`   ❌ Client '${client}' failed: ${err.message}`);
 		}
 	}
 
-	// If we reach here, all clients failed
 	await sendMessage(chatId, '❌ Unable to download this YouTube video.\nAll clients failed. This may be due to YouTube restrictions or server IP blocking.', replyTo);
 }
 
@@ -361,9 +398,7 @@ async function processMessage(msg) {
 	console.log(`⏰ Timer reset: alive until ${new Date(aliveUntil).toISOString()}`);
 
 	if (text === '/start') {
-		await sendMessage(chatId,
-			`👋`
-		);
+		await sendMessage(chatId, `👋`);
 		return;
 	}
 
@@ -389,7 +424,20 @@ async function processMessage(msg) {
 	await sendChatAction(chatId, 'typing');
 
 	try {
-		const { buffer, contentType } = await smartDownload(targetUrl);
+		let { buffer, contentType } = await smartDownload(targetUrl);   // note: let, not const
+		const ext = getExtension(targetUrl, contentType);
+
+		// === Blocked extensions → wrap in ZIP ===
+		const BLOCKED_EXTENSIONS = ['.apk', '.exe', '.dmg', '.msi'];   // add more if needed
+		if (BLOCKED_EXTENSIONS.includes(ext)) {
+			console.log(`   🔐 Wrapping ${ext} in ZIP`);
+			const { zipBuffer, newName } = await zipBuffer(buffer, path.basename(targetUrl) || 'file' + ext);
+			buffer = zipBuffer;
+			contentType = 'application/zip';
+			// Update the URL caption to indicate it's now zipped
+			targetUrl = targetUrl + ' (zipped)';
+		}
+
 		const sizeMB = buffer.length / (1024 * 1024);
 		console.log(`   ✅ Downloaded ${sizeMB.toFixed(1)} MB, type: ${contentType || 'unknown'}`);
 
@@ -402,13 +450,13 @@ async function processMessage(msg) {
 			await sendSingleFile(chatId, buffer, contentType, targetUrl, msgId);
 		} else {
 			const { baseName, totalParts } = await sendFileInChunks(chatId, buffer, targetUrl, msgId);
-			const ext = path.extname(baseName);
+			const fext = path.extname(baseName);
 			const instructions =
 				`✅ All ${totalParts} parts sent.\n\n` +
 				`To reassemble the file:\n` +
 				`\`\`\`bash\n` +
-				`Linux / macOS:\n\`\`\`\ncat part_*${ext} > original${ext}\n\`\`\`\n` +
-				`Windows (Command Prompt):\n\`\`\`\ncopy /b part_*${ext} original${ext}\n\`\`\`\n` +
+				`Linux / macOS:\n\`\`\`\ncat part_*${fext} > original${fext}\n\`\`\`\n` +
+				`Windows (Command Prompt):\n\`\`\`\ncopy /b part_*${fext} original${fext}\n\`\`\`\n` +
 				`\`\`\``;
 			await sendMessage(chatId, instructions, msgId);
 		}
@@ -453,7 +501,6 @@ async function initialize() {
 	} catch (err) {
 		console.error('❌ Failed to create YouTube session:', err.message);
 		console.log('⚠️ YouTube downloads will not work, but bot remains alive.');
-		// We don't crash – bot still works for other downloads
 	}
 }
 
