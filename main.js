@@ -21,7 +21,7 @@ const ALLOWED_PREFIX = ['mlibre', 'the_mohist'];
 
 // Self-ping configuration
 const PORT = process.env.PORT || 3000;
-const SELF_URL = process.env.SELF_URL || `http://localhost:${PORT}`;
+const SELF_URL = process.env.SELF_URL || `http://localhost:${PORT}`; // SELF_URL is for keep live server
 const PING_URLS = [
 	SELF_URL,
 	`http://localhost:${PORT}`,
