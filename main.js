@@ -17,7 +17,7 @@ const MAX_CHUNK_SIZE = MAX_CHUNK_MB * 1024 * 1024;
 const DOWNLOAD_LIMIT = 500 * 1024 * 1024;
 
 // Allowed users – username must start with one of these prefixes
-const ALLOWED_PREFIX = ['mlibre', 'The_Mohist'];
+const ALLOWED_PREFIX = ['mlibre', 'the_mohist'];
 
 // Self-ping configuration
 const PORT = process.env.PORT || 3000;
