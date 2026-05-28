@@ -30,7 +30,7 @@ const PING_URLS = [
 
 // One-week timer (7 days in ms)
 const ONE_WEEK_MS = 7 * 24 * 60 * 60 * 1000;
-let aliveUntil = 0;
+let aliveUntil = Date.now() + ONE_WEEK_MS;
 const PING_INTERVAL_MS = 13 * 60 * 1000;
 
 let offset = -1;
